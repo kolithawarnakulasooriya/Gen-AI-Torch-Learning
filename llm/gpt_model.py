@@ -3,13 +3,17 @@ from typing import Optional, Tuple
 
 class Head(torch.nn.Module):
 
-    def __init__(self, head_size: int, block_size:int, embedding_size: int, dropout:int, device: torch.device):
+    def __init__(self, head_size: int, block_size:int, embedding_size: int, dropout:int, device: torch.device, multi_gpu: bool = False):
         super().__init__()
 
         self.key = torch.nn.Linear(embedding_size, head_size, bias=False)
         self.query = torch.nn.Linear(embedding_size, head_size, bias=False)
         self.value = torch.nn.Linear(embedding_size, head_size, bias=False)
-        self.mask = torch.tril(torch.ones(size=[block_size, block_size], dtype=torch.float)).to(device)
+        self.mask = torch.tril(torch.ones(size=[block_size, block_size], dtype=torch.float))
+
+        # if multi_gpu:
+        #     self.mask = torch.nn.parallel.data_parallel(self.mask)
+        self.mask = self.mask.to(device)
 
         self.dropout = torch.nn.Dropout(dropout)
 
@@ -29,9 +33,9 @@ class Head(torch.nn.Module):
     
 class MultiHeadAttention(torch.nn.Module):
 
-    def __init__(self, num_heads: int, head_size: int, block_size:int, embedding_size:int, dropout:int, device: torch.device):
+    def __init__(self, num_heads: int, head_size: int, block_size:int, embedding_size:int, dropout:int, device: torch.device, multi_gpu: bool = False):
         super().__init__()
-        self.heads = torch.nn.ModuleList([Head(head_size, block_size, embedding_size, dropout=dropout, device=device) for _ in range(num_heads)])
+        self.heads = torch.nn.ModuleList([Head(head_size, block_size, embedding_size, dropout=dropout, device=device, multi_gpu=multi_gpu) for _ in range(num_heads)])
         self.projection = torch.nn.Linear(head_size * num_heads, embedding_size)
         self.dropout = torch.nn.Dropout(dropout)
 
@@ -56,10 +60,10 @@ class FeedForward(torch.nn.Module):
     
 class Block(torch.nn.Module):
 
-    def __init__(self, embedding_size:int, num_heads: int, block_size:int, dropout: int, device: torch.device):
+    def __init__(self, embedding_size:int, num_heads: int, block_size:int, dropout: int, device: torch.device, multi_gpu: bool = False):
         super().__init__()
         head_size = embedding_size // num_heads
-        self.self_attention = MultiHeadAttention(num_heads=num_heads, head_size=head_size, block_size=block_size, embedding_size=embedding_size, dropout=dropout, device=device)
+        self.self_attention = MultiHeadAttention(num_heads=num_heads, head_size=head_size, block_size=block_size, embedding_size=embedding_size, dropout=dropout, device=device, multi_gpu=multi_gpu)
         self.feed_forward = FeedForward(embedding_size=embedding_size, dropout=dropout)
         self.layer_norm_1 = torch.nn.LayerNorm(embedding_size)
         self.layer_norm_2 = torch.nn.LayerNorm(embedding_size)
@@ -73,13 +77,14 @@ class Block(torch.nn.Module):
     
 class GPTModel(torch.nn.Module):
 
-    def __init__(self, vocab_size:int, embedding_size:int, num_heads: int, block_size:int, num_layers:int, dropout:int, device: torch.device):
+    def __init__(self, vocab_size:int, embedding_size:int, num_heads: int, block_size:int, num_layers:int, dropout:int, device: torch.device, multi_gpu: bool = False):
         super().__init__()
 
         self.block_size = block_size
         self.token_embedding_table = torch.nn.Embedding(vocab_size, embedding_size)
         self.position_embedding_table = torch.nn.Embedding(block_size, embedding_size)
         self.device = device
+        self.multi_gpu = multi_gpu
 
         self.blocks = torch.nn.Sequential(
             *[Block(embedding_size, num_heads, block_size, dropout, device=device) for _ in range(num_layers)]
@@ -103,7 +108,8 @@ class GPTModel(torch.nn.Module):
 
         B, T = input_tokens.shape
         token_embedding = self.token_embedding_table(input_tokens)
-        position_embedding = self.position_embedding_table(torch.arange(T, device=self.device))
+        data_ = torch.arange(T)
+        position_embedding = self.position_embedding_table(data_.to(self.device))
         x = token_embedding + position_embedding
         x = self.blocks(x)
         x = self.final_layer_norm(x)
